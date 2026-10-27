@@ -65,3 +65,13 @@ SELECT * FROM (
  UNION ALL SELECT 'Chocolate Brownie','Dessert',80,160,4.6,95,1,'Demo verified','Rich chocolate brownie','sweet,chocolate,comforting','https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=800',1,0,0,NULL
 ) AS seed
 WHERE NOT EXISTS (SELECT 1 FROM food_items LIMIT 1);
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role ENUM('customer', 'restaurant', 'admin')
+        NOT NULL DEFAULT 'customer',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
