@@ -1,3 +1,5 @@
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import express from 'express';
 import cors from 'cors';
 import mysql from 'mysql2/promise';
@@ -6,7 +8,148 @@ import dotenv from 'dotenv';
 dotenv.config();
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json());const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error('Set JWT_SECRET to a random secret of at least 32 characters');
+}
+
+function createToken(user) {
+  return jwt.sign(
+    { id: user.id, role: user.role, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+}
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (
+      typeof name !== 'string' || name.trim().length < 2 ||
+      name.trim().length > 100 ||
+      typeof email !== 'string' ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+      typeof password !== 'string' ||
+      password.length < 8 || password.length > 72
+    ) {
+      return res.status(400).json({
+        error: 'Enter a valid name and email, and a password of 8–72 characters'
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const [result] = await pool.query(
+      `INSERT INTO users (name, email, password_hash, role)
+       VALUES (?, ?, ?, 'customer')`,
+      [name.trim(), normalizedEmail, passwordHash]
+    );
+
+    const user = {
+      id: result.insertId,
+      name: name.trim(),
+      email: normalizedEmail,
+      role: 'customer'
+    };
+
+    res.status(201).json({
+      message: 'Account created successfully',
+      token: createToken(user),
+      user
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Email is already registered' });
+    }
+
+    console.error('Registration error:', error.message);
+    res.status(500).json({ error: 'Could not create account' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (
+      typeof email !== 'string' ||
+      typeof password !== 'string' ||
+      email.length > 255 || password.length > 72
+    ) {
+      return res.status(400).json({ error: 'Invalid email or password' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT id, name, email, password_hash, role, is_active
+       FROM users WHERE email = ? LIMIT 1`,
+      [email.trim().toLowerCase()]
+    );
+
+    const user = rows[0];
+
+    if (
+      !user ||
+      !user.is_active ||
+      !(await bcrypt.compare(password, user.password_hash))
+    ) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const publicUser = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    };
+
+    res.json({
+      message: 'Login successful',
+      token: createToken(publicUser),
+      user: publicUser
+    });
+  } catch (error) {
+    console.error('Login error:', error.message);
+    res.status(500).json({ error: 'Could not log in' });
+  }
+});
+
+function authenticateToken(req, res, next) {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+
+  if (scheme !== 'Bearer' || !token) {
+    return res.status(401).json({ error: 'Please log in first' });
+  }
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Session expired or invalid' });
+  }
+}
+
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, email, role, is_active
+       FROM users WHERE id = ? LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (!rows.length || !rows[0].is_active) {
+      return res.status(401).json({ error: 'Account is unavailable' });
+    }
+
+    res.json({ user: rows[0] });
+  } catch (error) {
+    console.error('Profile error:', error.message);
+    res.status(500).json({ error: 'Could not load profile' });
+  }
+});
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
@@ -134,15 +277,28 @@ app.post('/api/orders', async (req,res) => {
   } finally { conn.release(); }
 });
 
-app.get('/api/orders/:userId', async (req,res) => {
+app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
-    const [orders] = await pool.query('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC',[req.params.userId]);
+    const [orders] = await pool.query(
+      'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC',
+      [req.user.id]
+    );
+
     for (const order of orders) {
-      const [items] = await pool.query('SELECT food_id,food_name,quantity,unit_price FROM order_items WHERE order_id=?',[order.id]);
+      const [items] = await pool.query(
+        `SELECT food_id, food_name, quantity, unit_price
+         FROM order_items WHERE order_id = ?`,
+        [order.id]
+      );
+
       order.items = items;
     }
+
     res.json(orders);
-  } catch(e) { res.status(500).json({error:e.message}); }
+  } catch (error) {
+    console.error('Order history error:', error.message);
+    res.status(500).json({ error: 'Could not load order history' });
+  }
 });
 
 app.get('/api/surplus-meals', async (_req,res) => {
